@@ -1,0 +1,135 @@
+
+
+// Micrologistical Cart Robot v1.5
+// Andres Wallentin
+// Using Sabertooth 2x60 Motor Controller
+
+
+#include <Sabertooth.h>  // Motor controller library
+#include <SPI.h>  // for communication with BLE shield
+#include <boards.h>
+#include <RBL_nRF8001.h>
+#include <RBL_services.h>
+#include <math.h>
+#include <RunningAverage.h> // for smoothing the control input
+
+
+// Set to Packetized Serial Mode using DIP switches
+//Turn on mixed-mode on the DIP switches
+// Set address to 128 using DIP switches
+// Connect TX to S1 on Motor Controller
+
+Sabertooth ST(128); 
+
+RunningAverage horRA(2);
+RunningAverage verRA(2);
+int samples=0;
+
+// define the pins for startup relays
+int PrechargePin=7;
+int PowerPin=6;
+
+
+void setup() {
+
+  // begin SPI communication for BLE shield
+  SPI.setDataMode(SPI_MODE0);
+  SPI.setBitOrder(LSBFIRST);
+  SPI.setClockDivider(SPI_CLOCK_DIV16);
+  SPI.begin();
+
+  // initialize BLE shield
+  ble_begin();
+  
+  // Startup sequence.
+  pinMode(PrechargePin,OUTPUT);
+  pinMode(PowerPin,OUTPUT);
+  digitalWrite(PrechargePin, LOW);  //Precharge sequence to avoid current spike in capacitors in motor controller
+  digitalWrite(PowerPin, HIGH);
+  delay(300);                     // adjust according to precharge resistor value/time desired
+  digitalWrite(PowerPin, LOW);
+  delay(200);
+  digitalWrite(PrechargePin, HIGH); // turn off to draw less power
+  
+  
+  // setup ST
+  SabertoothTXPinSerial.begin(9600); // default baud rate
+  ST.autobaud(); // might not be necessary, 
+  
+  ST.drive(0);
+  ST.turn(0);
+  
+  // clear running averages
+  horRA.clear();
+  verRA.clear();
+
+
+}
+
+void loop()  {
+  
+  // while the BLE is receiving information from the iPhone app
+  while(ble_available()){
+    // the app sends a signal from 0 to 254 corresponding to each extreme of the joystick (i.e. neutral is 127 for both axes)
+    // the motor controller takes inputs from -127 (full reverse/ full left) to 127 (full forward/ full right)
+    int hor = (ble_read()-127)* 1;
+    int ver = (ble_read()-127)*-1; // depending on motor connections, the signal might need to be inverted to correspond to the "front" of the cart
+  
+    // add readings to the running average arrays (for smoothing)
+    horRA.addValue(hor);
+    verRA.addValue(ver);
+    
+    samples++;
+    
+    // define a dead-band. If joystick is within dead-band then neutral values are added to the Running Averages to bring the cart to a stop.
+    if (abs(hor)<15){
+      horRA.addValue(0);
+      horRA.addValue(0);
+      horRA.addValue(0);
+    }
+    if (abs(ver)<15) {
+      verRA.addValue(0);
+      verRA.addValue(0);
+      verRA.addValue(0);
+    }
+
+    // get values from running averages
+    int Turn=horRA.getAverage(); //^3/(127^2);
+    int  Drive=verRA.getAverage(); //^3/(127^2);
+    
+    // the following scales down the sensitivity of each axis
+    Turn = Turn; //^3/(127^2);
+    Drive = Drive^3/(127^2);
+
+    // If the bot is moving forward or in reverse at a certain speed, then scale the turning variable as a factor of power to limit high speed turning
+    if (abs(Drive) >50) {
+    Turn = Turn/(abs(Drive/50));
+    
+    }
+    // Drive and turn are reversed because of how the motors are connected. It works as is. If the cart is modified at some point, one of the motors should be flipped to have the signals correspond.
+    ST.drive(- Turn*100/127); // limits the turning  (-100 to 100)
+    ST.turn(Drive);
+    
+  }
+  
+   // reset the running averages once you pass 100 samples to save memory.
+   if (samples > 100)
+  {
+    samples = 0;
+    verRA.clear();
+    horRA.clear();
+  }
+  
+  // stop the cart if there is no bluetooth signal coming in
+  if (!ble_connected()) {
+    ST.drive(0);
+    ST.turn(0);
+  }
+  
+  // must be called for the BLE shield to do its stuff
+  ble_do_events();
+  
+  delay(10); // small delay to let the program run smoothly
+    
+}
+
